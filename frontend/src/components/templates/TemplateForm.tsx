@@ -79,6 +79,28 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
     void fetchDetectedValues(templateId);
   }, [detectedValues, templateId, templateStatus]);
 
+  useEffect(() => {
+    if (!templateId || !detectedValues) {
+      return;
+    }
+
+    const hasColorChanges = getChangedValidColorRows(colorRows).length > 0;
+
+    if (!hasColorChanges) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void saveAllReplacements()
+        .then(() => refreshPreview())
+        .catch((error: unknown) => {
+          setErrorMessage(error instanceof Error ? error.message : "Could not update preview colors.");
+        });
+    }, 500);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [colorRows, detectedValues, replacementRows, templateId]);
+
   async function uploadTemplateZip(file: File) {
     const trimmedName = templateName.trim();
 
@@ -206,7 +228,7 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
       setDetectedValues(values);
       setColorRows(values.colors.map((color) => ({
         from: color.value,
-        to: toColorInputValue(color.value),
+        to: color.value,
       })));
     } catch (error) {
       setUploadState("failed");
@@ -257,7 +279,7 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
         },
         body: JSON.stringify({
           texts: nextRows,
-          colors: colorRows.filter((row) => row.from !== row.to),
+          colors: getChangedValidColorRows(colorRows),
         }),
       });
 
@@ -305,13 +327,21 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
   }
 
   function updateColorReplacement(from: string, to: string) {
-    setColorRows((currentRows) => [
-      ...currentRows.filter((row) => row.from !== from),
-      {
-        from,
-        to,
-      },
-    ]);
+    setColorRows((currentRows) => {
+      const existingRow = currentRows.find((row) => row.from === from);
+
+      if (!existingRow) {
+        return [
+          ...currentRows,
+          {
+            from,
+            to,
+          },
+        ];
+      }
+
+      return currentRows.map((row) => (row.from === from ? { from, to } : row));
+    });
   }
 
   async function saveAllReplacements() {
@@ -326,7 +356,7 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
       },
       body: JSON.stringify({
         texts: replacementRows,
-        colors: colorRows.filter((row) => row.from !== row.to),
+        colors: getChangedValidColorRows(colorRows),
       }),
     });
 
@@ -380,7 +410,7 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
     setReplacementRows([]);
     setColorRows(detectedValues?.colors.map((color) => ({
       from: color.value,
-      to: toColorInputValue(color.value),
+      to: color.value,
     })) ?? []);
     setValidationMessage(null);
     setDownloadUrl(null);
@@ -497,21 +527,35 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
               <span className="h-px flex-1 bg-neutral-300" />
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              {detectedValues.colors.slice(0, 6).map((color) => (
-                <label
-                  className="flex h-8 items-center gap-2 rounded-md border border-neutral-400 px-2 text-xs"
-                  key={color.id}
-                >
-                  <span>{color.value}</span>
-                  <input
-                    className="h-5 w-5"
-                    onChange={(event) => updateColorReplacement(color.value, event.target.value)}
-                    type="color"
-                    value={colorRows.find((row) => row.from === color.value)?.to ?? toColorInputValue(color.value)}
-                  />
-                </label>
-              ))}
+            <div className="grid max-h-40 grid-cols-1 gap-2 overflow-y-auto pr-1">
+              {detectedValues.colors.map((color) => {
+                const currentColor = colorRows.find((row) => row.from === color.value)?.to ?? color.value;
+                const canUseColorPicker = isHexColor(currentColor);
+
+                return (
+                  <label
+                    className="grid min-h-8 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-neutral-400 px-2 py-1 text-xs"
+                    key={color.id}
+                  >
+                    <span className="truncate" title={color.value}>
+                      {color.value}
+                    </span>
+                    <Input
+                      className="h-7 rounded text-xs"
+                      onChange={(event) => updateColorReplacement(color.value, event.target.value)}
+                      title={`Replace ${color.value} with`}
+                      value={currentColor}
+                    />
+                    <input
+                      className="h-5 w-5"
+                      disabled={!canUseColorPicker}
+                      onChange={(event) => updateColorReplacement(color.value, event.target.value)}
+                      type="color"
+                      value={canUseColorPicker ? toColorInputValue(currentColor) : "#000000"}
+                    />
+                  </label>
+                );
+              })}
             </div>
           </section>
 
@@ -559,4 +603,20 @@ function toColorInputValue(value: string) {
   }
 
   return "#000000";
+}
+
+function isHexColor(value: string) {
+  return /^#[0-9a-fA-F]{3}$/.test(value) || /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+function isSupportedColorValue(value: string) {
+  return (
+    isHexColor(value) ||
+    /^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$/.test(value) ||
+    /^hsl\(\s*\d{1,3}\s*,\s*\d{1,3}%\s*,\s*\d{1,3}%\s*\)$/.test(value)
+  );
+}
+
+function getChangedValidColorRows(colorRows: ColorReplacement[]) {
+  return colorRows.filter((row) => row.from !== row.to && isSupportedColorValue(row.to));
 }

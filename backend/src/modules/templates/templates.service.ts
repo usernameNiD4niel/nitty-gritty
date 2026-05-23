@@ -8,6 +8,7 @@ import { prepareTemplatePreview } from "./template-preview.js";
 import {
   createModifiedTemplateCopy,
   normalizeStoredReplacements,
+  applyReplacementsToBuiltAssets,
   ReplacementValidationError,
   textExistsInReplaceableFiles,
   type TemplateReplacements,
@@ -238,9 +239,9 @@ export class TemplatesService {
     const paths = getTemplatePaths(id);
 
     await assertSourceExists(paths.sourceDir);
-    await createModifiedTemplateCopy(paths.sourceDir, paths.modifiedDir, replacements);
 
-    const previewEntry = await prepareTemplatePreview(paths.modifiedDir, paths.previewDir);
+    const previewEntry = await prepareTemplatePreview(paths.sourceDir, paths.previewDir);
+    await applyReplacementsToBuiltAssets(paths.previewDir, replacements);
     const previewUrl = previewEntry ? `/templates-preview/${id}/preview/${previewEntry}` : null;
 
     const updatedTemplate = await prisma.template.update({

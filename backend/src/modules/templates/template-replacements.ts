@@ -69,6 +69,30 @@ export async function zipDirectory(sourceDir: string, zipPath: string) {
   zip.writeZip(zipPath);
 }
 
+export async function applyReplacementsToBuiltAssets(rootDir: string, replacements: TemplateReplacements) {
+  if (replacements.texts.length === 0 && replacements.colors.length === 0) {
+    return;
+  }
+
+  const files = await collectFiles(rootDir, rootDir, ignore());
+
+  for (const filePath of files) {
+    if (![".css", ".js", ".html"].includes(path.extname(filePath))) {
+      continue;
+    }
+
+    let content = await readFile(filePath, "utf8");
+
+    content = applyPlainTextReplacements(content, replacements.texts);
+
+    for (const replacement of replacements.colors) {
+      content = applyColorReplacement(content, replacement);
+    }
+
+    await writeFile(filePath, content);
+  }
+}
+
 export async function textExistsInReplaceableFiles(sourceDir: string, text: string) {
   const needle = text.trim();
 
@@ -133,10 +157,87 @@ async function applyReplacements(rootDir: string, replacements: TemplateReplacem
     content = applyTextReplacements(content, path.extname(filePath), replacements.texts);
 
     for (const replacement of replacements.colors) {
-      content = content.replaceAll(replacement.from, replacement.to);
+      content = applyColorReplacement(content, replacement);
     }
 
     await writeFile(filePath, content);
+  }
+}
+
+function applyColorReplacement(content: string, replacement: ColorReplacement) {
+  const fromVariants = getColorVariants(replacement.from);
+
+  return fromVariants.reduce(
+    (currentContent, fromVariant) => currentContent.replaceAll(fromVariant, replacement.to),
+    content,
+  );
+}
+
+function getColorVariants(value: string) {
+  const normalized = normalizeColor(value);
+  const variants = new Set([value, normalized]);
+  addFunctionalColorVariants(variants, normalized);
+
+  if (/^#[0-9a-f]{3}$/i.test(normalized)) {
+    const [, red, green, blue] = normalized;
+    const expanded = `#${red}${red}${green}${green}${blue}${blue}`;
+    variants.add(`#${red}${red}${green}${green}${blue}${blue}`);
+    addRgbVariants(variants, expanded);
+  }
+
+  if (/^#[0-9a-f]{6}$/i.test(normalized)) {
+    const [, r1, r2, g1, g2, b1, b2] = normalized;
+    addRgbVariants(variants, normalized);
+
+    if (r1 === r2 && g1 === g2 && b1 === b2) {
+      variants.add(`#${r1}${g1}${b1}`);
+    }
+  }
+
+  return [...variants];
+}
+
+function addRgbVariants(variants: Set<string>, hex: string) {
+  const red = Number.parseInt(hex.slice(1, 3), 16);
+  const green = Number.parseInt(hex.slice(3, 5), 16);
+  const blue = Number.parseInt(hex.slice(5, 7), 16);
+
+  variants.add(`rgb(${red} ${green} ${blue} / var(--tw-bg-opacity, 1))`);
+  variants.add(`rgb(${red} ${green} ${blue} / var(--tw-border-opacity, 1))`);
+  variants.add(`rgb(${red} ${green} ${blue} / var(--tw-text-opacity, 1))`);
+  variants.add(`rgb(${red}, ${green}, ${blue})`);
+  variants.add(`rgb(${red},${green},${blue})`);
+  variants.add(`rgb(${red} ${green} ${blue})`);
+  variants.add(`rgba(${red}, ${green}, ${blue}, 1)`);
+  variants.add(`rgba(${red},${green},${blue},1)`);
+}
+
+function addFunctionalColorVariants(variants: Set<string>, value: string) {
+  const rgbMatch = value.match(
+    /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*(0|1|0?\.\d+))?\s*\)$/i,
+  );
+
+  if (rgbMatch) {
+    const [, red, green, blue, alpha] = rgbMatch;
+
+    variants.add(`rgb(${red}, ${green}, ${blue})`);
+    variants.add(`rgb(${red},${green},${blue})`);
+    variants.add(`rgb(${red} ${green} ${blue})`);
+
+    if (alpha !== undefined) {
+      variants.add(`rgba(${red}, ${green}, ${blue}, ${alpha})`);
+      variants.add(`rgba(${red},${green},${blue},${alpha})`);
+    }
+
+    return;
+  }
+
+  const hslMatch = value.match(/^hsl\(\s*(\d{1,3})\s*,\s*(\d{1,3})%\s*,\s*(\d{1,3})%\s*\)$/i);
+
+  if (hslMatch) {
+    const [, hue, saturation, lightness] = hslMatch;
+    variants.add(`hsl(${hue}, ${saturation}%, ${lightness}%)`);
+    variants.add(`hsl(${hue},${saturation}%,${lightness}%)`);
   }
 }
 
