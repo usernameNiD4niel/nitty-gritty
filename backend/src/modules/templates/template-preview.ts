@@ -20,6 +20,8 @@ export async function prepareTemplatePreview(sourceDir: string, previewDir: stri
   }
 
   if (await hasBuildScript(projectRoot)) {
+    await removeBuildOutputDirs(projectRoot);
+
     try {
       await runNpm(["install", "--ignore-scripts"], projectRoot, 300_000);
       await runNpm(["run", "build"], projectRoot, 300_000);
@@ -99,6 +101,17 @@ async function findBuildOutputDir(projectRoot: string) {
   }
 
   return null;
+}
+
+async function removeBuildOutputDirs(projectRoot: string) {
+  await Promise.all(
+    BUILD_OUTPUT_DIRS.map((dirName) =>
+      rm(path.join(projectRoot, dirName), {
+        recursive: true,
+        force: true,
+      }),
+    ),
+  );
 }
 
 async function findIndexHtml(rootDir: string) {

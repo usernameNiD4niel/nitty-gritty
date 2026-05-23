@@ -53,7 +53,7 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
     }
 
     return (
-      detectedValues?.texts.find((text) => text.value.trim().toLowerCase() === normalizedFromText) ?? null
+      detectedValues?.texts.find((text) => text.value.trim().toLowerCase().includes(normalizedFromText)) ?? null
     );
   }, [detectedValues, fromText]);
 
@@ -242,14 +242,22 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
         return;
       }
 
-      const saveResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/replacements/texts`, {
-        method: "POST",
+      const nextReplacement = {
+        from: fromText.trim(),
+        to: toText.trim(),
+      };
+      const nextRows = [
+        ...replacementRows.filter((row) => row.from !== nextReplacement.from),
+        nextReplacement,
+      ];
+      const saveResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/replacements`, {
+        method: "PATCH",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: fromText,
-          to: toText,
+          texts: nextRows,
+          colors: colorRows.filter((row) => row.from !== row.to),
         }),
       });
 
@@ -257,20 +265,42 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
         throw new Error(await readApiError(saveResponse));
       }
 
-      const nextReplacement = {
-        from: fromText.trim(),
-        to: toText.trim(),
-      };
-
-      setReplacementRows((currentRows) => [
-        ...currentRows.filter((row) => row.from !== nextReplacement.from),
-        nextReplacement,
-      ]);
+      setReplacementRows(nextRows);
       setValidationMessage("FOUND");
       setFromText("");
       setToText("");
+      void refreshPreview();
     } catch (error) {
       setValidationMessage(error instanceof Error ? error.message : "Could not save replacement.");
+    }
+  }
+
+  async function refreshPreview() {
+    if (!templateId) {
+      return;
+    }
+
+    onPreviewStateChange?.("loading");
+
+    try {
+      const previewResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/preview`, {
+        method: "POST",
+      });
+
+      if (!previewResponse.ok) {
+        throw new Error(await readApiError(previewResponse));
+      }
+
+      const preview = (await previewResponse.json()) as { previewUrl: string | null };
+
+      if (preview.previewUrl) {
+        onPreviewUrlChange?.(`${API_BASE_URL}${preview.previewUrl}?t=${Date.now()}`);
+        onPreviewStateChange?.("ready");
+      } else {
+        onPreviewStateChange?.("failed");
+      }
+    } catch {
+      onPreviewStateChange?.("failed");
     }
   }
 
@@ -319,22 +349,7 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
     try {
       await saveAllReplacements();
 
-      const previewResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/preview`, {
-        method: "POST",
-      });
-
-      if (!previewResponse.ok) {
-        throw new Error(await readApiError(previewResponse));
-      }
-
-      const preview = (await previewResponse.json()) as { previewUrl: string | null };
-
-      if (preview.previewUrl) {
-        onPreviewUrlChange?.(`${API_BASE_URL}${preview.previewUrl}?t=${Date.now()}`);
-        onPreviewStateChange?.("ready");
-      } else {
-        onPreviewStateChange?.("failed");
-      }
+      await refreshPreview();
 
       const generateResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/generate`, {
         method: "POST",
@@ -461,10 +476,8 @@ export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: Templ
               <p className={`mt-2 text-xs ${validationMessage === "FOUND" ? "text-green-700" : "text-red-700"}`}>
                 {validationMessage}
               </p>
-            ) : fromText.trim() ? (
-              <p className={`mt-2 text-xs ${matchedText ? "text-green-700" : "text-red-700"}`}>
-                {matchedText ? "FOUND" : "Not found"}
-              </p>
+            ) : fromText.trim() && matchedText ? (
+              <p className="mt-2 text-xs text-green-700">FOUND</p>
             ) : null}
 
             <div className="mt-4 space-y-3 text-xs">

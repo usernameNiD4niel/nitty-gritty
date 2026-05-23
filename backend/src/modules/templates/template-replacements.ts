@@ -69,6 +69,31 @@ export async function zipDirectory(sourceDir: string, zipPath: string) {
   zip.writeZip(zipPath);
 }
 
+export async function textExistsInReplaceableFiles(sourceDir: string, text: string) {
+  const needle = text.trim();
+
+  if (!needle) {
+    return false;
+  }
+
+  const gitIgnore = await loadGitIgnore(sourceDir);
+  const files = await collectFiles(sourceDir, sourceDir, gitIgnore);
+
+  for (const filePath of files) {
+    if (!REPLACE_EXTENSIONS.has(path.extname(filePath))) {
+      continue;
+    }
+
+    const content = await readFile(filePath, "utf8");
+
+    if (content.includes(needle)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function validateReplacementPayload(value: unknown): TemplateReplacements {
   if (!value || typeof value !== "object") {
     return {
@@ -105,9 +130,7 @@ async function applyReplacements(rootDir: string, replacements: TemplateReplacem
 
     let content = await readFile(filePath, "utf8");
 
-    for (const replacement of replacements.texts) {
-      content = content.replaceAll(replacement.from, replacement.to);
-    }
+    content = applyTextReplacements(content, path.extname(filePath), replacements.texts);
 
     for (const replacement of replacements.colors) {
       content = content.replaceAll(replacement.from, replacement.to);
@@ -115,6 +138,62 @@ async function applyReplacements(rootDir: string, replacements: TemplateReplacem
 
     await writeFile(filePath, content);
   }
+}
+
+function applyTextReplacements(content: string, extension: string, replacements: TextReplacement[]) {
+  if (extension === ".md") {
+    return applyPlainTextReplacements(content, replacements);
+  }
+
+  let updated = content.replace(/(["'`])((?:\\.|(?!\1)[\s\S])*?)\1/g, (match, quote: string, value: string) => {
+    if (!isUserFacingReplacementTarget(value)) {
+      return match;
+    }
+
+    const nextValue = applyPlainTextReplacements(value, replacements);
+    return `${quote}${nextValue}${quote}`;
+  });
+
+  if (extension === ".html" || extension === ".tsx" || extension === ".jsx") {
+    updated = updated.replace(/>\s*([^<>{}][^<>{}]*)\s*</g, (match, value: string) => {
+      if (!isUserFacingReplacementTarget(value)) {
+        return match;
+      }
+
+      return `>${applyPlainTextReplacements(value, replacements)}<`;
+    });
+  }
+
+  return updated;
+}
+
+function applyPlainTextReplacements(content: string, replacements: TextReplacement[]) {
+  return replacements.reduce(
+    (currentContent, replacement) => currentContent.replaceAll(replacement.from, replacement.to),
+    content,
+  );
+}
+
+function isUserFacingReplacementTarget(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+
+  if (normalized.length < 3) {
+    return false;
+  }
+
+  if (/^https?:\/\//i.test(normalized) || /^(\/|\.\.?\/|@\/)/.test(normalized)) {
+    return false;
+  }
+
+  if (/^[A-Z0-9_]+$/.test(normalized)) {
+    return false;
+  }
+
+  if (/^[a-z0-9@/_-]+(?:\.[a-z0-9/_-]+)+$/i.test(normalized)) {
+    return false;
+  }
+
+  return /[a-zA-Z]/.test(normalized);
 }
 
 async function loadGitIgnore(rootDir: string) {

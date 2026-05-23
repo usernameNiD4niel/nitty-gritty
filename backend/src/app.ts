@@ -13,7 +13,18 @@ export function buildApp() {
   });
 
   app.register(cors, {
+    allowedHeaders: ["content-type"],
+    methods: ["GET", "HEAD", "POST", "PATCH", "OPTIONS"],
     origin: true,
+  });
+
+  app.addHook("onSend", async (request, reply) => {
+    const origin = request.headers.origin;
+
+    if (origin) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Vary", "Origin");
+    }
   });
 
   app.register(multipart, {

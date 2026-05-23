@@ -9,6 +9,7 @@ import {
   createModifiedTemplateCopy,
   normalizeStoredReplacements,
   ReplacementValidationError,
+  textExistsInReplaceableFiles,
   type TemplateReplacements,
   validateReplacementPayload,
   zipDirectory,
@@ -155,11 +156,12 @@ export class TemplatesService {
     const match = detectedTexts.find(
       (text) =>
         isDetectedText(text) &&
-        text.value.trim().toLowerCase() === normalizedFrom,
+        text.value.trim().toLowerCase().includes(normalizedFrom),
     );
+    const existsInFiles = await textExistsInReplaceableFiles(getTemplatePaths(id).sourceDir, from);
 
     return {
-      found: Boolean(match),
+      found: Boolean(match) || existsInFiles,
       text: match ?? null,
     };
   }
@@ -205,15 +207,17 @@ export class TemplatesService {
     const template = await this.getTemplate(id);
     const replacements = validateReplacementPayload(payload);
     const detectedTexts = Array.isArray(template.detectedTexts) ? template.detectedTexts : [];
+    const paths = getTemplatePaths(id);
 
     for (const replacement of replacements.texts) {
-      const exists = detectedTexts.some(
+      const existsInDetectedTexts = detectedTexts.some(
         (text) =>
           isDetectedText(text) &&
-          text.value.trim().toLowerCase() === replacement.from.trim().toLowerCase(),
+          text.value.trim().toLowerCase().includes(replacement.from.trim().toLowerCase()),
       );
+      const existsInFiles = await textExistsInReplaceableFiles(paths.sourceDir, replacement.from);
 
-      if (!exists) {
+      if (!existsInDetectedTexts && !existsInFiles) {
         throw new TemplateValidationError(`Text replacement not found: ${replacement.from}`);
       }
     }
