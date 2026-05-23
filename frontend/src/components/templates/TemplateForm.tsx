@@ -16,14 +16,19 @@ type DetectedValues = {
   colors: DetectedValue[];
 };
 type TemplateFormProps = {
+  onPreviewStateChange?: (previewState: "idle" | "loading" | "ready" | "failed") => void;
   onPreviewUrlChange?: (previewUrl: string | null) => void;
 };
 type TextReplacement = {
   from: string;
   to: string;
 };
+type ColorReplacement = {
+  from: string;
+  to: string;
+};
 
-export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
+export function TemplateForm({ onPreviewStateChange, onPreviewUrlChange }: TemplateFormProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [templateName, setTemplateName] = useState("");
   const [templateId, setTemplateId] = useState<string | null>(null);
@@ -35,7 +40,10 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
   const [fromText, setFromText] = useState("");
   const [toText, setToText] = useState("");
   const [replacementRows, setReplacementRows] = useState<TextReplacement[]>([]);
+  const [colorRows, setColorRows] = useState<ColorReplacement[]>([]);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
+  const [generationState, setGenerationState] = useState<"idle" | "generating" | "generated">("idle");
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
   const matchedText = useMemo(() => {
     const normalizedFromText = fromText.trim().toLowerCase();
@@ -91,7 +99,11 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
     setDetectedValues(null);
     setTemplateStatus(null);
     setReplacementRows([]);
+    setColorRows([]);
     setValidationMessage(null);
+    setDownloadUrl(null);
+    setGenerationState("idle");
+    onPreviewStateChange?.("idle");
     onPreviewUrlChange?.(null);
 
     try {
@@ -125,11 +137,22 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
         throw new Error(await readApiError(uploadResponse));
       }
 
-      const uploadedTemplate = (await uploadResponse.json()) as { id: string; status: TemplateStatus };
+      const uploadedTemplate = (await uploadResponse.json()) as {
+        id: string;
+        previewUrl: string | null;
+        status: TemplateStatus;
+      };
       setTemplateId(uploadedTemplate.id);
       setTemplateStatus(uploadedTemplate.status);
       setUploadedFileName(file.name);
       setUploadState("uploaded");
+
+      if (uploadedTemplate.previewUrl) {
+        onPreviewUrlChange?.(`${API_BASE_URL}${uploadedTemplate.previewUrl}`);
+        onPreviewStateChange?.("ready");
+      } else if (uploadedTemplate.status === "READY") {
+        onPreviewStateChange?.("failed");
+      }
     } catch (error) {
       setTemplateId(null);
       setUploadState("failed");
@@ -158,6 +181,7 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
 
       if (template.previewUrl) {
         onPreviewUrlChange?.(`${API_BASE_URL}${template.previewUrl}`);
+        onPreviewStateChange?.("ready");
       }
 
       if (template.status === "FAILED") {
@@ -178,7 +202,12 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
         throw new Error(await readApiError(response));
       }
 
-      setDetectedValues((await response.json()) as DetectedValues);
+      const values = (await response.json()) as DetectedValues;
+      setDetectedValues(values);
+      setColorRows(values.colors.map((color) => ({
+        from: color.value,
+        to: toColorInputValue(color.value),
+      })));
     } catch (error) {
       setUploadState("failed");
       setErrorMessage(error instanceof Error ? error.message : "Could not load detected values.");
@@ -243,6 +272,104 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
     } catch (error) {
       setValidationMessage(error instanceof Error ? error.message : "Could not save replacement.");
     }
+  }
+
+  function updateColorReplacement(from: string, to: string) {
+    setColorRows((currentRows) => [
+      ...currentRows.filter((row) => row.from !== from),
+      {
+        from,
+        to,
+      },
+    ]);
+  }
+
+  async function saveAllReplacements() {
+    if (!templateId) {
+      throw new Error("Upload a template before generating code.");
+    }
+
+    const response = await fetch(`${API_BASE_URL}/api/templates/${templateId}/replacements`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        texts: replacementRows,
+        colors: colorRows.filter((row) => row.from !== row.to),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await readApiError(response));
+    }
+  }
+
+  async function generateCode() {
+    if (!templateId) {
+      setErrorMessage("Upload a template before generating code.");
+      return;
+    }
+
+    setGenerationState("generating");
+    setErrorMessage(null);
+    setDownloadUrl(null);
+    onPreviewStateChange?.("loading");
+
+    try {
+      await saveAllReplacements();
+
+      const previewResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/preview`, {
+        method: "POST",
+      });
+
+      if (!previewResponse.ok) {
+        throw new Error(await readApiError(previewResponse));
+      }
+
+      const preview = (await previewResponse.json()) as { previewUrl: string | null };
+
+      if (preview.previewUrl) {
+        onPreviewUrlChange?.(`${API_BASE_URL}${preview.previewUrl}?t=${Date.now()}`);
+        onPreviewStateChange?.("ready");
+      } else {
+        onPreviewStateChange?.("failed");
+      }
+
+      const generateResponse = await fetch(`${API_BASE_URL}/api/templates/${templateId}/generate`, {
+        method: "POST",
+      });
+
+      if (!generateResponse.ok) {
+        throw new Error(await readApiError(generateResponse));
+      }
+
+      const generated = (await generateResponse.json()) as {
+        downloadUrl: string;
+        status: TemplateStatus;
+      };
+
+      setTemplateStatus(generated.status);
+      setDownloadUrl(`${API_BASE_URL}${generated.downloadUrl}`);
+      setGenerationState("generated");
+    } catch (error) {
+      onPreviewStateChange?.("failed");
+      setGenerationState("idle");
+      setErrorMessage(error instanceof Error ? error.message : "Generate code failed.");
+    }
+  }
+
+  function cancelTemplateEdits() {
+    setFromText("");
+    setToText("");
+    setReplacementRows([]);
+    setColorRows(detectedValues?.colors.map((color) => ({
+      from: color.value,
+      to: toColorInputValue(color.value),
+    })) ?? []);
+    setValidationMessage(null);
+    setDownloadUrl(null);
+    setGenerationState("idle");
   }
 
   return (
@@ -364,11 +491,35 @@ export function TemplateForm({ onPreviewUrlChange }: TemplateFormProps) {
                   key={color.id}
                 >
                   <span>{color.value}</span>
-                  <input className="h-5 w-5" readOnly type="color" value={toColorInputValue(color.value)} />
+                  <input
+                    className="h-5 w-5"
+                    onChange={(event) => updateColorReplacement(color.value, event.target.value)}
+                    type="color"
+                    value={colorRows.find((row) => row.from === color.value)?.to ?? toColorInputValue(color.value)}
+                  />
                 </label>
               ))}
             </div>
           </section>
+
+          <div className="-mx-12 mt-6 flex items-center justify-center gap-6 border-t border-black px-8 pt-5">
+            <Button
+              className="h-12 px-6 text-base"
+              disabled={generationState === "generating"}
+              onClick={generateCode}
+            >
+              {generationState === "generating" ? "Generating" : "Generate Code"}
+            </Button>
+            <Button className="border-transparent px-2" onClick={cancelTemplateEdits}>
+              Cancel
+            </Button>
+          </div>
+
+          {downloadUrl ? (
+            <a className="block text-center text-sm text-green-700 underline" href={downloadUrl}>
+              Download generated code
+            </a>
+          ) : null}
         </div>
       ) : null}
     </form>

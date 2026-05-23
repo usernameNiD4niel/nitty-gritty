@@ -1,18 +1,23 @@
 import type { Template } from "@prisma/client";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { env } from "../../lib/env.js";
 import { prisma } from "../../lib/prisma.js";
-import { extractTemplateZip, findPreviewEntry, scanTemplateDirectory } from "./template-scanner.js";
+import { prepareTemplatePreview } from "./template-preview.js";
+import {
+  createModifiedTemplateCopy,
+  normalizeStoredReplacements,
+  ReplacementValidationError,
+  type TemplateReplacements,
+  validateReplacementPayload,
+  zipDirectory,
+} from "./template-replacements.js";
+import { extractTemplateZip, scanTemplateDirectory } from "./template-scanner.js";
 
 type TextReplacement = {
   from: string;
   to: string;
-};
-
-type TemplateReplacements = {
-  texts?: TextReplacement[];
-  colors?: Array<{ from: string; to: string }>;
 };
 
 export class TemplatesService {
@@ -69,6 +74,7 @@ export class TemplatesService {
     const templateDir = getTemplateStoragePath(id);
     const originalZipPath = path.join(templateDir, "original.zip");
     const sourceDir = path.join(templateDir, "source");
+    const previewDir = path.join(templateDir, "preview");
 
     await mkdir(templateDir, {
       recursive: true,
@@ -88,7 +94,7 @@ export class TemplatesService {
 
       await extractTemplateZip(fileBuffer, sourceDir);
       const detectedValues = await scanTemplateDirectory(sourceDir);
-      const previewEntry = await findPreviewEntry(sourceDir);
+      const previewEntry = await prepareTemplatePreview(sourceDir, previewDir);
 
       return prisma.template.update({
         where: {
@@ -97,7 +103,7 @@ export class TemplatesService {
         data: {
           status: "READY",
           originalZipUrl: originalZipPath,
-          previewUrl: previewEntry ? `/templates-preview/${id}/source/${previewEntry}` : null,
+          previewUrl: previewEntry ? `/templates-preview/${id}/preview/${previewEntry}` : null,
           detectedTexts: detectedValues.texts,
           detectedColors: detectedValues.colors,
         },
@@ -173,7 +179,7 @@ export class TemplatesService {
     }
 
     const template = await this.getTemplate(id);
-    const replacements = normalizeReplacements(template.replacements);
+    const replacements = normalizeStoredReplacements(template.replacements);
     const nextTexts = [
       ...replacements.texts.filter((existing) => existing.from !== from),
       {
@@ -194,6 +200,113 @@ export class TemplatesService {
       },
     });
   }
+
+  async saveReplacements(id: string, payload: unknown) {
+    const template = await this.getTemplate(id);
+    const replacements = validateReplacementPayload(payload);
+    const detectedTexts = Array.isArray(template.detectedTexts) ? template.detectedTexts : [];
+
+    for (const replacement of replacements.texts) {
+      const exists = detectedTexts.some(
+        (text) =>
+          isDetectedText(text) &&
+          text.value.trim().toLowerCase() === replacement.from.trim().toLowerCase(),
+      );
+
+      if (!exists) {
+        throw new TemplateValidationError(`Text replacement not found: ${replacement.from}`);
+      }
+    }
+
+    return prisma.template.update({
+      where: {
+        id,
+      },
+      data: {
+        replacements,
+      },
+    });
+  }
+
+  async createPreview(id: string) {
+    const template = await this.getTemplate(id);
+    const replacements = normalizeStoredReplacements(template.replacements);
+    const paths = getTemplatePaths(id);
+
+    await assertSourceExists(paths.sourceDir);
+    await createModifiedTemplateCopy(paths.sourceDir, paths.modifiedDir, replacements);
+
+    const previewEntry = await prepareTemplatePreview(paths.modifiedDir, paths.previewDir);
+    const previewUrl = previewEntry ? `/templates-preview/${id}/preview/${previewEntry}` : null;
+
+    const updatedTemplate = await prisma.template.update({
+      where: {
+        id,
+      },
+      data: {
+        previewUrl,
+      },
+    });
+
+    return {
+      previewUrl,
+      template: updatedTemplate,
+    };
+  }
+
+  async generateTemplate(id: string) {
+    const template = await this.getTemplate(id);
+    const replacements = normalizeStoredReplacements(template.replacements);
+    const hasReplacements = replacements.texts.length > 0 || replacements.colors.length > 0;
+
+    if (!template.originalZipUrl) {
+      throw new TemplateValidationError("Original template zip is missing.");
+    }
+
+    if (!hasReplacements) {
+      throw new TemplateValidationError("At least one replacement is required before generating code.");
+    }
+
+    const paths = getTemplatePaths(id);
+    await assertSourceExists(paths.sourceDir);
+    await createModifiedTemplateCopy(paths.sourceDir, paths.generatedSourceDir, replacements);
+    await zipDirectory(paths.generatedSourceDir, paths.generatedZipPath);
+
+    await prisma.template.update({
+      where: {
+        id,
+      },
+      data: {
+        status: "GENERATED",
+        generatedZipUrl: paths.generatedZipPath,
+      },
+    });
+
+    return {
+      id,
+      status: "GENERATED",
+      downloadUrl: `/api/templates/${id}/download`,
+    };
+  }
+
+  async getGeneratedZipStream(id: string) {
+    const template = await this.getTemplate(id);
+
+    if (!template.generatedZipUrl) {
+      throw new TemplateNotFoundError("Generated zip not found.");
+    }
+
+    try {
+      await stat(template.generatedZipUrl);
+    } catch {
+      throw new TemplateNotFoundError("Generated zip not found.");
+    }
+
+    return {
+      fileName: `${template.name.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}-generated.zip`,
+      stream: createReadStream(template.generatedZipUrl),
+    };
+  }
 }
 
 export class TemplateValidationError extends Error {
@@ -203,8 +316,8 @@ export class TemplateValidationError extends Error {
 export class TemplateNotFoundError extends Error {
   statusCode = 404;
 
-  constructor() {
-    super("Template not found.");
+  constructor(message = "Template not found.") {
+    super(message);
   }
 }
 
@@ -220,6 +333,19 @@ function getTemplateStoragePath(templateId: string) {
   return path.resolve(process.cwd(), env.localTemplateStorageDir, templateId);
 }
 
+function getTemplatePaths(templateId: string) {
+  const templateDir = getTemplateStoragePath(templateId);
+
+  return {
+    templateDir,
+    sourceDir: path.join(templateDir, "source"),
+    previewDir: path.join(templateDir, "preview"),
+    modifiedDir: path.join(templateDir, "modified"),
+    generatedSourceDir: path.join(templateDir, "generated-source"),
+    generatedZipPath: path.join(templateDir, "generated.zip"),
+  };
+}
+
 function isDetectedText(value: unknown): value is { id: string; value: string; occurrences: number } {
   return (
     typeof value === "object" &&
@@ -229,18 +355,16 @@ function isDetectedText(value: unknown): value is { id: string; value: string; o
   );
 }
 
-function normalizeReplacements(value: unknown): Required<TemplateReplacements> {
-  if (!value || typeof value !== "object") {
-    return {
-      texts: [],
-      colors: [],
-    };
+async function assertSourceExists(sourceDir: string) {
+  try {
+    const sourceStats = await stat(sourceDir);
+
+    if (!sourceStats.isDirectory()) {
+      throw new Error("Template source directory is not available.");
+    }
+  } catch {
+    throw new TemplateValidationError("Template source directory is not available.");
   }
-
-  const replacements = value as TemplateReplacements;
-
-  return {
-    texts: Array.isArray(replacements.texts) ? replacements.texts : [],
-    colors: Array.isArray(replacements.colors) ? replacements.colors : [],
-  };
 }
+
+export { ReplacementValidationError };

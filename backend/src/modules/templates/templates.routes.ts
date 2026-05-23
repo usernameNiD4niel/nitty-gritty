@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
+  ReplacementValidationError,
   TemplateNotFoundError,
   TemplatesService,
   TemplateStorageError,
@@ -17,6 +18,17 @@ type ValidateTextBody = {
 type AddTextReplacementBody = {
   from?: string;
   to?: string;
+};
+
+type ReplacementsBody = {
+  texts?: Array<{
+    from?: string;
+    to?: string;
+  }>;
+  colors?: Array<{
+    from?: string;
+    to?: string;
+  }>;
 };
 
 export async function templatesRoutes(app: FastifyInstance) {
@@ -113,11 +125,57 @@ export async function templatesRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  app.patch<{ Body: ReplacementsBody; Params: { id: string } }>(
+    "/templates/:id/replacements",
+    async (request, reply) => {
+      try {
+        const template = await templatesService.saveReplacements(request.params.id, request.body);
+        return reply.send(template);
+      } catch (error) {
+        return sendTemplateError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>("/templates/:id/preview", async (request, reply) => {
+    try {
+      const result = await templatesService.createPreview(request.params.id);
+      return reply.send({
+        previewUrl: result.previewUrl,
+      });
+    } catch (error) {
+      return sendTemplateError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/templates/:id/generate", async (request, reply) => {
+    try {
+      const result = await templatesService.generateTemplate(request.params.id);
+      return reply.send(result);
+    } catch (error) {
+      return sendTemplateError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/templates/:id/download", async (request, reply) => {
+    try {
+      const generatedZip = await templatesService.getGeneratedZipStream(request.params.id);
+
+      return reply
+        .header("Content-Type", "application/zip")
+        .header("Content-Disposition", `attachment; filename="${generatedZip.fileName}"`)
+        .send(generatedZip.stream);
+    } catch (error) {
+      return sendTemplateError(reply, error);
+    }
+  });
 }
 
 function sendTemplateError(reply: FastifyReply, error: unknown) {
   if (
     error instanceof TemplateValidationError ||
+    error instanceof ReplacementValidationError ||
     error instanceof TemplateNotFoundError ||
     error instanceof TemplateStorageError
   ) {
